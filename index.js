@@ -1,5 +1,5 @@
 (() => {
-    const PLUGIN_NAME = "Reezy Mass DM";
+    const PLUGIN_NAME = "SDM Bulk";
     const MAX_TARGETS = 100;
 
     let unregisterBulk = null;
@@ -73,10 +73,6 @@
         const ChannelActionCreators =
             metro.findByProps("openPrivateChannel");
 
-        const GuildMemberStore =
-            metro.findByProps("getMember", "getMembers") ||
-            metro.findByProps("getMember");
-
         if (!Dispatcher?.dispatch) throw new Error("Could not find Flux dispatcher.");
         if (!UserStore?.getUser) throw new Error("Could not find UserStore.");
         if (!ChannelStore?.getDMFromUserId) throw new Error("Could not find ChannelStore.");
@@ -88,8 +84,7 @@
             Dispatcher,
             UserStore,
             ChannelStore,
-            ChannelActionCreators,
-            GuildMemberStore
+            ChannelActionCreators
         };
     }
 
@@ -99,62 +94,6 @@
         const ms = BigInt(Math.floor(safeMs));
         const rand = BigInt(Math.floor(Math.random() * 4194303));
         return String(((ms - EPOCH) << 22n) | rand);
-    }
-
-
-    function resolveUserFromMutuals(UserStore, GuildMemberStore, userId) {
-        try {
-            const direct = UserStore?.getUser?.(userId);
-            if (direct) return direct;
-        } catch {}
-
-        if (!GuildMemberStore) return null;
-
-        try {
-            const all = GuildMemberStore.getMembers?.();
-            if (all && typeof all === "object") {
-                for (const key of Object.keys(all)) {
-                    const members = all[key];
-                    if (!members) continue;
-
-                    let member = null;
-
-                    if (Array.isArray(members)) {
-                        member = members.find(m =>
-                            String(
-                                m?.user?.id ??
-                                m?.userId ??
-                                m?.id ??
-                                ""
-                            ) === String(userId)
-                        );
-                    } else if (typeof members === "object") {
-                        member = members[userId] ?? null;
-
-                        if (!member) {
-                            for (const value of Object.values(members)) {
-                                if (
-                                    String(
-                                        value?.user?.id ??
-                                        value?.userId ??
-                                        value?.id ??
-                                        ""
-                                    ) === String(userId)
-                                ) {
-                                    member = value;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-
-                    const user = member?.user ?? member?.userObject ?? null;
-                    if (user?.id) return user;
-                }
-            }
-        } catch {}
-
-        return null;
     }
 
     function fallbackUser(id) {
@@ -549,18 +488,17 @@
         const timeInput = getArg(args, "time");
 
         if (!ids.length) {
-            toast("Reezy Mass DM: no valid user IDs.");
+            toast("SDM Bulk: no valid user IDs.");
             return;
         }
 
         if (!script.trim()) {
-            toast("Reezy Mass DM: script cannot be empty.");
+            toast("SDM Bulk: script cannot be empty.");
             return;
         }
 
-        const SAFE_MAX_TARGETS = 50;
-        if (ids.length > SAFE_MAX_TARGETS) {
-            toast(`Reezy Mass DM: max ${SAFE_MAX_TARGETS} IDs per run in stable mode.`);
+        if (ids.length > MAX_TARGETS) {
+            toast(`SDM Bulk: max ${MAX_TARGETS} IDs per run.`);
             return;
         }
 
@@ -572,48 +510,32 @@
                 Dispatcher,
                 UserStore,
                 ChannelStore,
-                ChannelActionCreators,
-                GuildMemberStore
+                ChannelActionCreators
             } = modules();
 
             let injected = 0;
             let opened = 0;
             let failed = 0;
 
-            // Conservative pacing for stability and normal API usage.
-            const OPEN_SETTLE_MS = 1200;
-            const BETWEEN_TARGETS_MS = 2500;
-
             for (let i = 0; i < ids.length; i++) {
                 const userId = ids[i];
 
                 try {
-                    const user = resolveUserFromMutuals(
-                        UserStore,
-                        GuildMemberStore,
-                        userId
-                    );
-
-                    if (!user) {
-                        throw new Error(
-                            `Could not resolve ${userId} from cached profile or mutual-server data. View their profile once and retry.`
-                        );
-                    }
+                    let user = null;
+                    try { user = UserStore.getUser(userId); } catch {}
+                    if (!user) user = fallbackUser(userId);
 
                     const existedBefore = Boolean(getDmChannelId(ChannelStore, userId));
 
+                    // Use Discord's own DM-opening action. This creates/loads the real
+                    // DM channel and lets Discord update all of its own stores safely.
                     const channelId = await openRealDm(
                         ChannelActionCreators,
                         ChannelStore,
                         userId
                     );
 
-                    if (!existedBefore) {
-                        opened++;
-                        await sleep(OPEN_SETTLE_MS);
-                    } else {
-                        await sleep(350);
-                    }
+                    if (!existedBefore) opened++;
 
                     const messageId = fakeSnowflakeFromTimestamp(baseMs, i);
                     const timestamp = new Date(baseMs + i).toISOString();
@@ -634,6 +556,9 @@
 
                     saveRecord(record);
                     injected++;
+
+                    // Process sequentially so Kettu/Discord can update each DM cleanly.
+                    if (i < ids.length - 1) await sleep(250);
                 } catch (err) {
                     failed++;
                     try {
@@ -643,20 +568,18 @@
                         );
                     } catch {}
                 }
-
-                if (i < ids.length - 1) {
-                    await sleep(BETWEEN_TARGETS_MS);
-                }
             }
 
+            const shown = baseTimestamp.toLocaleString();
+
             toast(
-                `Reezy Mass DM: ${injected}/${ids.length} injected • ${opened} opened` +
+                `SDM Bulk: ${injected}/${ids.length} injected • ${opened} DM${opened === 1 ? "" : "s"} opened` +
                 (failed ? ` • ${failed} failed` : "") +
-                ` • stable pacing`
+                ` • ${shown}`
             );
         } catch (err) {
             try { vendetta?.logger?.error?.(`[${PLUGIN_NAME}]`, err); } catch {}
-            toast(`Reezy Mass DM error: ${err?.message || String(err)}`);
+            toast(`SDM Bulk error: ${err?.message || String(err)}`);
         }
     }
 
@@ -686,9 +609,18 @@
                         id: record.messageId
                     });
                 } catch {}
+
+                try {
+                    Dispatcher.dispatch({
+                        type: "CHANNEL_DELETE",
+                        channel: { id: record.channelId },
+                        channelId: record.channelId,
+                        id: record.channelId
+                    });
+                } catch {}
             }
 
-            toast(`Clear DM: removed ${toClear.length} local fake message${toClear.length === 1 ? "" : "s"}.`);
+            toast(`Clear DM: removed ${toClear.length} spoofed DM${toClear.length === 1 ? "" : "s"}.`);
         } catch (err) {
             try { vendetta?.logger?.error?.(`[${PLUGIN_NAME}] clear`, err); } catch {}
             toast(`Clear DM error: ${err?.message || String(err)}`);
@@ -696,15 +628,55 @@
     }
 
     function restorePersistentDMs() {
-        // Stable build: no synthetic message replay while Kettu is starting.
-        return;
+        if (!storage.spoofDMs.length) return;
+
+        // Safe persistence: we only replay fake MESSAGE_CREATE events into
+        // REAL DM channels that Discord already knows about. We never create
+        // synthetic channel objects during startup.
+        setTimeout(async () => {
+            let restored = 0;
+
+            try {
+                const {
+                    Dispatcher,
+                    ChannelStore
+                } = modules();
+
+                for (const record of storage.spoofDMs) {
+                    if (!record?.realDm) continue;
+
+                    const currentChannelId =
+                        getDmChannelId(ChannelStore, record.userId) ||
+                        record.channelId;
+
+                    if (!currentChannelId) continue;
+
+                    try {
+                        const replay = {
+                            ...record,
+                            channelId: currentChannelId
+                        };
+
+                        if (dispatchFakeIncoming(Dispatcher, replay)) {
+                            restored++;
+                        }
+                    } catch {}
+
+                    await sleep(80);
+                }
+
+                if (restored) {
+                    toast(`SDM Bulk: restored ${restored} local fake DM${restored === 1 ? "" : "s"}.`);
+                }
+            } catch {}
+        }, 2500);
     }
 
     return {
         onLoad() {
             unregisterBulk = vendetta.commands.registerCommand({
-                name: "reezy-mass-dm",
-                displayName: "reezy-mass-dm",
+                name: "sdm-bulk",
+                displayName: "sdm-bulk",
                 description: "Open DMs and inject a local preset script for multiple users",
                 displayDescription: "Open DMs and inject a local preset script for multiple users",
                 options: [
@@ -747,8 +719,8 @@
             unregisterClear = vendetta.commands.registerCommand({
                 name: "clear-dm",
                 displayName: "clear-dm",
-                description: "Clear spoofed DMs created by Reezy Mass DM",
-                displayDescription: "Clear spoofed DMs created by Reezy Mass DM",
+                description: "Clear spoofed DMs created by SDM Bulk",
+                displayDescription: "Clear spoofed DMs created by SDM Bulk",
                 options: [
                     {
                         name: "targets",
@@ -822,7 +794,8 @@
                 execute: clearRoleSwapExecute
             });
 
-            toast("Reezy Mass DM enabled.");
+            restorePersistentDMs();
+            toast("SDM Bulk enabled.");
         },
 
         onUnload() {
