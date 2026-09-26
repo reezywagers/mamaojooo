@@ -497,8 +497,9 @@
             return;
         }
 
-        if (ids.length > MAX_TARGETS) {
-            toast(`SDM Bulk: max ${MAX_TARGETS} IDs per run.`);
+        const SAFE_MAX_TARGETS = 50;
+        if (ids.length > SAFE_MAX_TARGETS) {
+            toast(`SDM Bulk: max ${SAFE_MAX_TARGETS} IDs per run in stable mode.`);
             return;
         }
 
@@ -517,6 +518,10 @@
             let opened = 0;
             let failed = 0;
 
+            // Conservative pacing for stability and normal API usage.
+            const OPEN_SETTLE_MS = 1200;
+            const BETWEEN_TARGETS_MS = 2500;
+
             for (let i = 0; i < ids.length; i++) {
                 const userId = ids[i];
 
@@ -527,15 +532,18 @@
 
                     const existedBefore = Boolean(getDmChannelId(ChannelStore, userId));
 
-                    // Use Discord's own DM-opening action. This creates/loads the real
-                    // DM channel and lets Discord update all of its own stores safely.
                     const channelId = await openRealDm(
                         ChannelActionCreators,
                         ChannelStore,
                         userId
                     );
 
-                    if (!existedBefore) opened++;
+                    if (!existedBefore) {
+                        opened++;
+                        await sleep(OPEN_SETTLE_MS);
+                    } else {
+                        await sleep(350);
+                    }
 
                     const messageId = fakeSnowflakeFromTimestamp(baseMs, i);
                     const timestamp = new Date(baseMs + i).toISOString();
@@ -556,9 +564,6 @@
 
                     saveRecord(record);
                     injected++;
-
-                    // Process sequentially so Kettu/Discord can update each DM cleanly.
-                    if (i < ids.length - 1) await sleep(250);
                 } catch (err) {
                     failed++;
                     try {
@@ -568,14 +573,16 @@
                         );
                     } catch {}
                 }
+
+                if (i < ids.length - 1) {
+                    await sleep(BETWEEN_TARGETS_MS);
+                }
             }
 
-            const shown = baseTimestamp.toLocaleString();
-
             toast(
-                `SDM Bulk: ${injected}/${ids.length} injected • ${opened} DM${opened === 1 ? "" : "s"} opened` +
+                `SDM Bulk: ${injected}/${ids.length} injected • ${opened} opened` +
                 (failed ? ` • ${failed} failed` : "") +
-                ` • ${shown}`
+                ` • stable pacing`
             );
         } catch (err) {
             try { vendetta?.logger?.error?.(`[${PLUGIN_NAME}]`, err); } catch {}
@@ -609,18 +616,9 @@
                         id: record.messageId
                     });
                 } catch {}
-
-                try {
-                    Dispatcher.dispatch({
-                        type: "CHANNEL_DELETE",
-                        channel: { id: record.channelId },
-                        channelId: record.channelId,
-                        id: record.channelId
-                    });
-                } catch {}
             }
 
-            toast(`Clear DM: removed ${toClear.length} spoofed DM${toClear.length === 1 ? "" : "s"}.`);
+            toast(`Clear DM: removed ${toClear.length} local fake message${toClear.length === 1 ? "" : "s"}.`);
         } catch (err) {
             try { vendetta?.logger?.error?.(`[${PLUGIN_NAME}] clear`, err); } catch {}
             toast(`Clear DM error: ${err?.message || String(err)}`);
@@ -628,48 +626,8 @@
     }
 
     function restorePersistentDMs() {
-        if (!storage.spoofDMs.length) return;
-
-        // Safe persistence: we only replay fake MESSAGE_CREATE events into
-        // REAL DM channels that Discord already knows about. We never create
-        // synthetic channel objects during startup.
-        setTimeout(async () => {
-            let restored = 0;
-
-            try {
-                const {
-                    Dispatcher,
-                    ChannelStore
-                } = modules();
-
-                for (const record of storage.spoofDMs) {
-                    if (!record?.realDm) continue;
-
-                    const currentChannelId =
-                        getDmChannelId(ChannelStore, record.userId) ||
-                        record.channelId;
-
-                    if (!currentChannelId) continue;
-
-                    try {
-                        const replay = {
-                            ...record,
-                            channelId: currentChannelId
-                        };
-
-                        if (dispatchFakeIncoming(Dispatcher, replay)) {
-                            restored++;
-                        }
-                    } catch {}
-
-                    await sleep(80);
-                }
-
-                if (restored) {
-                    toast(`SDM Bulk: restored ${restored} local fake DM${restored === 1 ? "" : "s"}.`);
-                }
-            } catch {}
-        }, 2500);
+        // Stable build: no synthetic message replay while Kettu is starting.
+        return;
     }
 
     return {
@@ -794,7 +752,6 @@
                 execute: clearRoleSwapExecute
             });
 
-            restorePersistentDMs();
             toast("SDM Bulk enabled.");
         },
 
