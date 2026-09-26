@@ -1,13 +1,13 @@
 {
-  "name": "Kettu SDM Toolkit",
-  "description": "All-in-one Kettu toolkit using Discord's real DM-opening action, with local fake messages, timestamps, clearing, and local role spoofing.",
+  "name": "Kettu SDM Toolkit Stable",
+  "description": "Stable local-only toolkit using Discord's real DM opener with conservative sequential pacing.",
   "authors": [
     {
       "name": "reezywagers"
     }
   ],
   "main": "index.js",
-  "hash": "34c9865b160a79dbfbe30b669ba4dd715a67ff760f49ad8e36fe31610c982732",
+  "hash": "ad546be84b56dc05554b02e24bf4cc3820e25f0ea0ab3d446bc18306ae7fae15",
   "vendetta": {
     "icon": "ic_message"
   }
