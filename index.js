@@ -1,8 +1,9 @@
 (() => {
-    const PLUGIN_NAME = "SDM Bulk";
+    const PLUGIN_NAME = "Reezy Mass DM";
     const MAX_TARGETS = 100;
 
     let unregisterBulk = null;
+    let unregisterSpoofer = null;
     let unregisterClear = null;
     let unregisterRoleSwap = null;
     let unregisterClearRoleSwap = null;
@@ -23,6 +24,7 @@
 
     if (!Array.isArray(storage.spoofDMs)) storage.spoofDMs = [];
     if (!Array.isArray(storage.roleSwaps)) storage.roleSwaps = [];
+    if (typeof storage.spooferScript !== "string" || !storage.spooferScript.trim()) storage.spooferScript = "Hey! I saw you in [Server], wanted to reach out!";
 
     function getArg(args, name) {
         const item = Array.isArray(args) ? args.find(x => x?.name === name) : null;
@@ -43,6 +45,27 @@
             }
         }
         return ids;
+    }
+
+    function parseTargetPairs(input) {
+        const text = String(input ?? "").trim();
+        const matches = [...text.matchAll(/\d{17,20}/g)];
+        const pairs = [];
+        const seen = new Set();
+        for (let i = 0; i < matches.length; i++) {
+            const userId = matches[i][0];
+            if (seen.has(userId)) continue;
+            seen.add(userId);
+            const start = matches[i].index + userId.length;
+            const end = i + 1 < matches.length ? matches[i + 1].index : text.length;
+            const serverName = text.slice(start, end).trim().replace(/^[,;|]+|[,;|]+$/g, "").trim();
+            pairs.push({ userId, serverName: serverName || "Server" });
+        }
+        return pairs;
+    }
+
+    function applyServerPlaceholder(script, serverName) {
+        return String(script ?? "").replace(/\[Server\]/gi, String(serverName || "Server"));
     }
 
     function toast(message) {
@@ -73,6 +96,14 @@
         const ChannelActionCreators =
             metro.findByProps("openPrivateChannel");
 
+        const GuildMemberStore =
+            metro.findByProps("getMember", "getMembers") ||
+            metro.findByProps("getMember");
+
+        const GuildStore =
+            metro.findByProps("getGuilds", "getGuild") ||
+            metro.findByProps("getGuild");
+
         if (!Dispatcher?.dispatch) throw new Error("Could not find Flux dispatcher.");
         if (!UserStore?.getUser) throw new Error("Could not find UserStore.");
         if (!ChannelStore?.getDMFromUserId) throw new Error("Could not find ChannelStore.");
@@ -84,7 +115,9 @@
             Dispatcher,
             UserStore,
             ChannelStore,
-            ChannelActionCreators
+            ChannelActionCreators,
+            GuildMemberStore,
+            GuildStore
         };
     }
 
@@ -96,17 +129,38 @@
         return String(((ms - EPOCH) << 22n) | rand);
     }
 
-    function fallbackUser(id) {
-        return {
-            id,
-            username: `User ${id.slice(-4)}`,
-            global_name: null,
-            discriminator: "0",
-            avatar: null,
-            bot: false,
-            system: false,
-            public_flags: 0
-        };
+    function resolveRealUser(UserStore, GuildMemberStore, GuildStore, userId) {
+        try {
+            const direct = UserStore?.getUser?.(userId);
+            if (direct?.id) return direct;
+        } catch {}
+
+        const guildIds = new Set();
+        try {
+            const guilds = GuildStore?.getGuilds?.();
+            if (guilds && typeof guilds === "object") {
+                for (const [id, guild] of Object.entries(guilds)) {
+                    if (guild?.id || /^\d{17,20}$/.test(id)) guildIds.add(String(guild?.id || id));
+                }
+            }
+        } catch {}
+        try {
+            const all = GuildMemberStore?.getMembers?.();
+            if (all && typeof all === "object") {
+                for (const [guildId] of Object.entries(all)) {
+                    if (/^\d{17,20}$/.test(String(guildId))) guildIds.add(String(guildId));
+                }
+            }
+        } catch {}
+
+        for (const guildId of guildIds) {
+            try {
+                const member = GuildMemberStore?.getMember?.(guildId, userId);
+                const user = member?.user ?? member?.userObject;
+                if (user?.id) return user;
+            } catch {}
+        }
+        return null;
     }
 
     function parseTimestamp(dateInput, timeInput) {
@@ -174,16 +228,8 @@
 
     function createLocalDm(Dispatcher, ChannelStore, user, channelId, lastMessageId) {
         const channel = buildDmChannel(user, channelId, lastMessageId);
-
-        const inserted = installIntoMutablePrivateChannels(ChannelStore, channel);
-
-        // Tell Flux stores/components that a new private channel exists.
-        Dispatcher.dispatch({
-            type: "CHANNEL_CREATE",
-            channel
-        });
-
-        return inserted;
+        Dispatcher.dispatch({ type: "CHANNEL_CREATE", channel });
+        return channelId;
     }
 
     function dispatchFakeIncoming(Dispatcher, record) {
@@ -233,6 +279,268 @@
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
+
+    function getCurrentChatContext() {
+        try {
+            const metro = vendetta?.metro;
+            const SelectedChannelStore =
+                metro?.findByProps?.("getChannelId", "getLastSelectedChannelId") ||
+                metro?.findByProps?.("getChannelId");
+            const ChannelStore =
+                metro?.findByProps?.("getChannel", "getDMFromUserId") ||
+                metro?.findByProps?.("getDMChannelFromUserId", "getDMFromUserId");
+            const channelId = SelectedChannelStore?.getChannelId?.() || SelectedChannelStore?.getLastSelectedChannelId?.();
+            const channel = channelId ? ChannelStore?.getChannel?.(channelId) : null;
+            if (!channel) return {};
+
+            const GuildStore = metro?.findByProps?.("getGuilds", "getGuild");
+            const guildId = channel.guild_id || channel.guildId || null;
+            const guild = guildId ? GuildStore?.getGuild?.(guildId) : null;
+            let userId = null;
+            if (Array.isArray(channel.recipients)) {
+                userId = channel.recipients.find(x => x?.id)?.id || null;
+            }
+            if (!userId && Array.isArray(channel.recipient_ids)) {
+                userId = channel.recipient_ids.find(Boolean) || null;
+            }
+            return {
+                channelId,
+                guildId,
+                guildName: guild?.name || null,
+                userId
+            };
+        } catch {
+            return {};
+        }
+    }
+
+    function getGuildChoices() {
+        try {
+            const GuildStore = vendetta?.metro?.findByProps?.("getGuilds", "getGuild");
+            const guilds = GuildStore?.getGuilds?.() || {};
+            return Object.values(guilds)
+                .filter(g => g?.id && g?.name)
+                .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+                .slice(0, 100);
+        } catch {
+            return [];
+        }
+    }
+
+    function openSpooferPanel() {
+        const ui = vendetta?.ui;
+        const React = vendetta?.metro?.common?.React;
+        const RN = vendetta?.metro?.common?.ReactNative;
+        const showCustomAlert = ui?.alerts?.showCustomAlert;
+
+        if (!React || !RN || !showCustomAlert) {
+            try {
+                ui?.alerts?.showInputAlert?.({
+                    title: "Local Message Spoofer",
+                    confirmText: "Save",
+                    cancelText: "Cancel",
+                    initialValue: storage.spooferScript,
+                    placeholder: "Message text; use [Server]",
+                    onConfirm: value => {
+                        const text = String(value || "").trim();
+                        if (text) {
+                            storage.spooferScript = text;
+                            toast("Spoofer script saved.");
+                        }
+                    }
+                });
+            } catch {
+                toast("Spoofer panel is unavailable in this Kettu build.");
+            }
+            return;
+        }
+
+        const { useState } = React;
+        const { View, Text, TextInput, ScrollView, Pressable, Switch } = RN;
+        const ctx = getCurrentChatContext();
+
+        const Panel = () => {
+            const [userId, setUserId] = useState(ctx.userId || "");
+            const [message, setMessage] = useState(storage.spooferScript || "Hey! I saw you in [Server], wanted to reach out!");
+            const [serverId, setServerId] = useState(ctx.guildId || "");
+            const [serverName, setServerName] = useState(ctx.guildName || "");
+            const [linkPreviews, setLinkPreviews] = useState(true);
+            const [year, setYear] = useState(String(new Date().getFullYear()));
+            const [month, setMonth] = useState(String(new Date().getMonth() + 1));
+            const [day, setDay] = useState(String(new Date().getDate()));
+            const [hour, setHour] = useState(String(new Date().getHours()));
+            const [minute, setMinute] = useState(String(new Date().getMinutes()));
+            const [conversation, setConversation] = useState("");
+
+            const inputStyle = {
+                backgroundColor: "#23232d",
+                color: "#f2f3f5",
+                borderRadius: 8,
+                paddingHorizontal: 14,
+                paddingVertical: 11,
+                marginTop: 8,
+                marginBottom: 12,
+                fontSize: 16
+            };
+            const labelStyle = { color: "#f2f3f5", fontSize: 16, marginTop: 12 };
+            const helpStyle = { color: "#b5bac1", fontSize: 13, marginTop: 4, lineHeight: 18 };
+            const buttonStyle = {
+                backgroundColor: "#2b2d31",
+                borderRadius: 8,
+                padding: 13,
+                marginTop: 8
+            };
+            const buttonText = { color: "#f2f3f5", fontSize: 16, fontWeight: "600" };
+
+            const saveScript = () => {
+                const text = String(message || "").trim();
+                if (!text) return toast("Spoofer: enter a message first.");
+                storage.spooferScript = text;
+                toast("Spoofer script saved.");
+            };
+
+            const fillCurrent = () => {
+                const now = getCurrentChatContext();
+                if (now.userId) setUserId(now.userId);
+                if (now.guildId) setServerId(now.guildId);
+                if (now.guildName) setServerName(now.guildName);
+                toast(now.userId ? "Filled from current chat." : "No other user found in this chat.");
+            };
+
+            const pickServer = () => {
+                const choices = getGuildChoices();
+                if (!choices.length) return toast("No cached servers found.");
+                try {
+                    ui.alerts.showConfirmationAlert?.({
+                        title: "Pick from my servers",
+                        content: choices.slice(0, 20).map(g => `${g.name} — ${g.id}`).join("\\n\\n"),
+                        confirmText: "Use first shown",
+                        cancelText: "Cancel",
+                        onConfirm: () => {
+                            const g = choices[0];
+                            if (g) {
+                                setServerId(g.id);
+                                setServerName(g.name);
+                            }
+                        }
+                    });
+                } catch {
+                    const first = choices[0];
+                    setServerId(first.id);
+                    setServerName(first.name);
+                }
+            };
+
+            const resolvedServer = serverName || serverId || "(no match - enter a server ID or use the current server)";
+
+            const sendOne = async () => {
+                const id = String(userId || "").trim();
+                if (!/^\d{17,20}$/.test(id)) return toast("Spoofer: enter a valid User ID.");
+                const text = String(message || "").trim();
+                if (!text) return toast("Spoofer: enter a message.");
+
+                try {
+                    const { Dispatcher, UserStore, GuildMemberStore, GuildStore, ChannelStore } = modules();
+                    const user = resolveRealUser(UserStore, GuildMemberStore, GuildStore, id);
+                    if (!user) throw new Error("Could not resolve that user's cached profile.");
+                    const channelId = await openLocalDm(Dispatcher, ChannelStore, user, id);
+                    const stamp = new Date(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute), 0, 0);
+                    const record = {
+                        userId: id,
+                        user,
+                        channelId,
+                        messageId: fakeSnowflakeFromTimestamp(stamp.getTime(), Math.floor(Math.random() * 100000)),
+                        content: applyServerPlaceholder(text, resolvedServer),
+                        timestamp: stamp.toISOString(),
+                        realDm: false,
+                        serverName: resolvedServer,
+                        linkPreviews: !!linkPreviews
+                    };
+                    dispatchFakeIncoming(Dispatcher, record);
+                    saveRecord(record);
+                    storage.spooferScript = text;
+                    toast(`Fake message from ${user.username || user.global_name || id} created locally.`);
+                } catch (err) {
+                    toast(`Spoofer error: ${err?.message || String(err)}`);
+                }
+            };
+
+            const buildConversation = () => {
+                const lines = String(conversation || "").split(/\\n+/).map(x => x.trim()).filter(Boolean);
+                if (!lines.length) return toast("Conversation Builder: enter at least one line.");
+                const built = lines.map(line => {
+                    const m = line.match(/^([^\\[]+)?\\s*\\[(\\d{1,2}:\\d{2})\\]\\s*-\\s*(.*)$/);
+                    if (!m) return line.replace(/^['\"]|['\"]$/g, "");
+                    return m[3];
+                }).join("\\n");
+                setMessage(built);
+                storage.spooferScript = built;
+                toast(`${lines.length} conversation line${lines.length === 1 ? "" : "s"} loaded.`);
+            };
+
+            return React.createElement(View, { style: { backgroundColor: "#1e1f24", borderRadius: 16, overflow: "hidden", maxHeight: "92%" } },
+                React.createElement(View, { style: { paddingHorizontal: 20, paddingTop: 18, paddingBottom: 8, flexDirection: "row", justifyContent: "space-between", alignItems: "center" } },
+                    React.createElement(Text, { style: { color: "#f2f3f5", fontSize: 18, fontWeight: "700" } }, "Local Message Spoofer"),
+                    React.createElement(Text, { style: { color: "#b5bac1", fontSize: 14 } }, "LOCAL ONLY")
+                ),
+                React.createElement(ScrollView, { keyboardShouldPersistTaps: "handled", contentContainerStyle: { padding: 20, paddingTop: 6 } },
+                    React.createElement(Text, { style: { color: "#b5bac1", fontSize: 13, fontWeight: "700", marginTop: 8 } }, "FAKE MESSAGE"),
+                    React.createElement(Text, { style: labelStyle }, "User ID (Optional)"),
+                    React.createElement(TextInput, { value: userId, onChangeText: setUserId, placeholder: "User ID", placeholderTextColor: "#6d6f78", style: inputStyle, keyboardType: "number-pad" }),
+                    React.createElement(Pressable, { style: buttonStyle, onPress: fillCurrent },
+                        React.createElement(Text, { style: buttonText }, "Fill from current chat")
+                    ),
+                    React.createElement(Text, { style: labelStyle }, "Message"),
+                    React.createElement(TextInput, { value: message, onChangeText: setMessage, placeholder: "Enter message content", placeholderTextColor: "#6d6f78", style: [inputStyle, { minHeight: 90, textAlignVertical: "top" }], multiline: true }),
+                    React.createElement(Text, { style: labelStyle }, "Server ID for [server] tag (optional)"),
+                    React.createElement(TextInput, { value: serverId, onChangeText: setServerId, placeholder: "Paste a server ID", placeholderTextColor: "#6d6f78", style: inputStyle, keyboardType: "number-pad" }),
+                    React.createElement(Text, { style: { color: "#f2f3f5", fontSize: 14, marginTop: 4 } }, `[Server] = ${resolvedServer}`),
+                    React.createElement(Text, { style: helpStyle }, "Type [Server] in your message and it is replaced with the server name for the fake message."),
+                    React.createElement(Pressable, { style: buttonStyle, onPress: () => {
+                        const choices = getGuildChoices();
+                        const match = choices.find(g => g.id === serverId);
+                        if (match) setServerName(match.name);
+                        else if (serverId) toast("No cached server with that ID.");
+                    } }, React.createElement(Text, { style: buttonText }, "Resolve server name")),
+                    React.createElement(Pressable, { style: buttonStyle, onPress: () => {
+                        const now = getCurrentChatContext();
+                        if (now.guildId) { setServerId(now.guildId); setServerName(now.guildName || ""); }
+                        else toast("Current channel is not inside a server.");
+                    } }, React.createElement(Text, { style: buttonText }, "Use the server I'm in now")),
+                    React.createElement(Pressable, { style: buttonStyle, onPress: pickServer }, React.createElement(Text, { style: buttonText }, "Pick from my servers")),
+                    React.createElement(View, { style: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 12 } },
+                        React.createElement(View, null,
+                            React.createElement(Text, { style: labelStyle }, "Link Previews"),
+                            React.createElement(Text, { style: helpStyle }, "Keep the setting used by the spoofer.")),
+                        React.createElement(Switch, { value: linkPreviews, onValueChange: setLinkPreviews })
+                    ),
+                    React.createElement(Text, { style: { color: "#b5bac1", fontSize: 13, fontWeight: "700", marginTop: 12 } }, "CUSTOM TIMESTAMP"),
+                    ...[["Year", year, setYear], ["Month", month, setMonth], ["Day", day, setDay], ["Hour", hour, setHour], ["Minute", minute, setMinute]].map(([label, value, setter]) =>
+                        React.createElement(View, { key: label },
+                            React.createElement(Text, { style: labelStyle }, label),
+                            React.createElement(TextInput, { value, onChangeText: setter, style: inputStyle, keyboardType: "number-pad" })
+                        )
+                    ),
+                    React.createElement(Pressable, { style: { backgroundColor: "#5865f2", borderRadius: 8, padding: 14, marginTop: 8 }, onPress: sendOne },
+                        React.createElement(Text, { style: { color: "white", textAlign: "center", fontSize: 16, fontWeight: "700" } }, "Send Fake Message")
+                    ),
+                    React.createElement(Text, { style: { color: "#b5bac1", fontSize: 12, marginTop: 7 } }, "This never calls Discord's real message-send endpoint."),
+                    React.createElement(Text, { style: { color: "#b5bac1", fontSize: 13, fontWeight: "700", marginTop: 24 } }, "CONVERSATION BUILDER"),
+                    React.createElement(TextInput, { value: conversation, onChangeText: setConversation, placeholder: "them [07:24] - Hey...", placeholderTextColor: "#6d6f78", style: [inputStyle, { minHeight: 120, textAlignVertical: "top" }], multiline: true }),
+                    React.createElement(Text, { style: helpStyle }, "Format: userId [time] - message. Use 'me' for your own line. The built text becomes the saved /sdm spoofer script."),
+                    React.createElement(Pressable, { style: buttonStyle, onPress: buildConversation }, React.createElement(Text, { style: buttonText }, "Build Conversation")),
+                    React.createElement(Pressable, { style: { backgroundColor: "#2b2d31", borderRadius: 8, padding: 14, marginTop: 10, marginBottom: 24 }, onPress: saveScript }, React.createElement(Text, { style: { color: "#f2f3f5", textAlign: "center", fontSize: 16, fontWeight: "700" } }, "Save Spoofer Script"))
+                )
+            );
+        };
+
+        try {
+            showCustomAlert(Panel, {});
+        } catch (err) {
+            toast(`Could not open spoofer panel: ${err?.message || String(err)}`);
+        }
+    }
+
     function getDmChannelId(ChannelStore, userId) {
         try {
             const id = ChannelStore.getDMFromUserId(userId);
@@ -260,56 +568,18 @@
         return null;
     }
 
-    async function openRealDm(ChannelActionCreators, ChannelStore, userId) {
-        // If the DM already exists, don't make another request.
+    async function openLocalDm(Dispatcher, ChannelStore, user, userId) {
         const existing = getDmChannelId(ChannelStore, userId);
         if (existing) return existing;
 
-        let result;
+        const channelId = fakeSnowflakeFromTimestamp(
+            Date.now(),
+            Math.floor(Math.random() * 100000)
+        );
+        createLocalDm(Dispatcher, ChannelStore, user, channelId, channelId);
 
-        // Current Discord builds use an object with recipientIds.
-        // Keep a fallback for older Vendetta/Revenge builds.
-        try {
-            result = ChannelActionCreators.openPrivateChannel({
-                recipientIds: [userId]
-            });
-        } catch (firstError) {
-            try {
-                result = ChannelActionCreators.openPrivateChannel(userId);
-            } catch {
-                throw firstError;
-            }
-        }
-
-        // Some builds return a Promise / thenable, others only dispatch actions.
-        if (result && typeof result.then === "function") {
-            try {
-                const resolved = await result;
-                const directId =
-                    resolved?.id ??
-                    resolved?.channel?.id ??
-                    resolved?.channelId;
-
-                if (directId) return String(directId);
-            } catch (err) {
-                throw new Error(`Discord could not open DM: ${err?.message || String(err)}`);
-            }
-        } else {
-            const directId =
-                result?.id ??
-                result?.channel?.id ??
-                result?.channelId;
-
-            if (directId) return String(directId);
-        }
-
-        // The store is the source of truth. Give Discord time to create/cache it.
-        const channelId = await waitForDmChannel(ChannelStore, userId, 5000);
-        if (!channelId) {
-            throw new Error("DM channel did not appear in ChannelStore.");
-        }
-
-        return channelId;
+        const appeared = await waitForDmChannel(ChannelStore, userId, 1000);
+        return appeared || channelId;
     }
 
     function roleModules() {
@@ -482,111 +752,67 @@
     }
 
     async function bulkExecute(args) {
-        const ids = parseIds(getArg(args, "targets"));
-        const script = String(getArg(args, "script") ?? "");
+        const pairs = parseTargetPairs(getArg(args, "targets"));
         const dateInput = getArg(args, "date");
         const timeInput = getArg(args, "time");
 
-        if (!ids.length) {
-            toast("SDM Bulk: no valid user IDs.");
+        if (!pairs.length) {
+            toast("Reezy Mass DM: use ID + server name, e.g. 123456789 Minecraft");
             return;
         }
-
-        if (!script.trim()) {
-            toast("SDM Bulk: script cannot be empty.");
-            return;
-        }
-
-        const SAFE_MAX_TARGETS = 50;
-        if (ids.length > SAFE_MAX_TARGETS) {
-            toast(`SDM Bulk: max ${SAFE_MAX_TARGETS} IDs per run in stable mode.`);
+        if (pairs.length > 50) {
+            toast("Reezy Mass DM: max 50 targets per run.");
             return;
         }
 
         try {
             const baseTimestamp = parseTimestamp(dateInput, timeInput);
             const baseMs = baseTimestamp.getTime();
+            const { Dispatcher, UserStore, ChannelStore, GuildMemberStore, GuildStore } = modules();
+            const script = String(storage.spooferScript || "").trim();
 
-            const {
-                Dispatcher,
-                UserStore,
-                ChannelStore,
-                ChannelActionCreators
-            } = modules();
+            if (!script) {
+                toast("Reezy Mass DM: set a script with /spoofer first.");
+                return;
+            }
 
             let injected = 0;
-            let opened = 0;
             let failed = 0;
 
-            // Conservative pacing for stability and normal API usage.
-            const OPEN_SETTLE_MS = 1200;
-            const BETWEEN_TARGETS_MS = 2500;
-
-            for (let i = 0; i < ids.length; i++) {
-                const userId = ids[i];
-
+            for (let i = 0; i < pairs.length; i++) {
+                const { userId, serverName } = pairs[i];
                 try {
-                    let user = null;
-                    try { user = UserStore.getUser(userId); } catch {}
-                    if (!user) user = fallbackUser(userId);
+                    const user = resolveRealUser(UserStore, GuildMemberStore, GuildStore, userId);
+                    if (!user) throw new Error(`Could not resolve real profile for ${userId}.`);
 
-                    const existedBefore = Boolean(getDmChannelId(ChannelStore, userId));
-
-                    const channelId = await openRealDm(
-                        ChannelActionCreators,
-                        ChannelStore,
-                        userId
-                    );
-
-                    if (!existedBefore) {
-                        opened++;
-                        await sleep(OPEN_SETTLE_MS);
-                    } else {
-                        await sleep(350);
-                    }
-
-                    const messageId = fakeSnowflakeFromTimestamp(baseMs, i);
-                    const timestamp = new Date(baseMs + i).toISOString();
-
+                    const channelId = await openLocalDm(Dispatcher, ChannelStore, user, userId);
                     const record = {
                         userId,
                         user,
                         channelId,
-                        messageId,
-                        content: script,
-                        timestamp,
-                        realDm: true
+                        messageId: fakeSnowflakeFromTimestamp(baseMs, i),
+                        content: applyServerPlaceholder(script, serverName),
+                        timestamp: new Date(baseMs + i).toISOString(),
+                        realDm: false,
+                        serverName
                     };
 
-                    if (!dispatchFakeIncoming(Dispatcher, record)) {
-                        throw new Error("MESSAGE_CREATE dispatch failed.");
-                    }
-
+                    dispatchFakeIncoming(Dispatcher, record);
                     saveRecord(record);
                     injected++;
                 } catch (err) {
                     failed++;
-                    try {
-                        vendetta?.logger?.error?.(
-                            `[${PLUGIN_NAME}] target ${userId}`,
-                            err
-                        );
-                    } catch {}
+                    try { vendetta?.logger?.error?.(`[${PLUGIN_NAME}] ${userId}`, err); } catch {}
                 }
 
-                if (i < ids.length - 1) {
-                    await sleep(BETWEEN_TARGETS_MS);
-                }
+                if (i < pairs.length - 1) await sleep(2500);
             }
 
-            toast(
-                `SDM Bulk: ${injected}/${ids.length} injected • ${opened} opened` +
-                (failed ? ` • ${failed} failed` : "") +
-                ` • stable pacing`
-            );
+            toast(`Reezy Mass DM: ${injected}/${pairs.length} injected` +
+                (failed ? ` • ${failed} failed` : "") + " • local-only");
         } catch (err) {
             try { vendetta?.logger?.error?.(`[${PLUGIN_NAME}]`, err); } catch {}
-            toast(`SDM Bulk error: ${err?.message || String(err)}`);
+            toast(`Reezy Mass DM error: ${err?.message || String(err)}`);
         }
     }
 
@@ -633,24 +859,16 @@
     return {
         onLoad() {
             unregisterBulk = vendetta.commands.registerCommand({
-                name: "sdm-bulk",
-                displayName: "sdm-bulk",
-                description: "Open DMs and inject a local preset script for multiple users",
-                displayDescription: "Open DMs and inject a local preset script for multiple users",
+                name: "sdm",
+                displayName: "sdm",
+                description: "Receive local fake DMs from multiple user IDs",
+                displayDescription: "Receive local fake DMs from multiple user IDs",
                 options: [
                     {
                         name: "targets",
                         displayName: "targets",
-                        description: "User IDs separated by spaces or commas",
-                        displayDescription: "User IDs separated by spaces or commas",
-                        type: 3,
-                        required: true
-                    },
-                    {
-                        name: "script",
-                        displayName: "script",
-                        description: "Preset script",
-                        displayDescription: "Preset script",
+                        description: "ID + server name pairs, e.g. 123456789 Minecraft 987654321 Cool Server",
+                        displayDescription: "ID + server name pairs",
                         type: 3,
                         required: true
                     },
@@ -666,7 +884,7 @@
                         name: "time",
                         displayName: "time",
                         description: "Fake DM time: HH:MM or HH:MM:SS (optional)",
-                        displayDescription: "Fake DM time: HH:MM or HH:MM:SS (optional)",
+                        displayDescription: "Fake DM time: HH:MM or HH:MM:SS",
                         type: 3,
                         required: false
                     }
@@ -674,11 +892,31 @@
                 execute: bulkExecute
             });
 
+            unregisterSpoofer = vendetta.commands.registerCommand({
+                name: "spoofer",
+                displayName: "spoofer",
+                description: "Open the Local Message Spoofer panel.",
+                displayDescription: "Open the Local Message Spoofer panel.",
+                options: [
+                    {
+                        name: "script",
+                        displayName: "script",
+                        description: "Script text. [Server] is replaced per target.",
+                        displayDescription: "Script text. [Server] is replaced per target.",
+                        type: 3,
+                        required: false
+                    }
+                ],
+                execute: () => {
+                    openSpooferPanel();
+                }
+            });
+
             unregisterClear = vendetta.commands.registerCommand({
                 name: "clear-dm",
                 displayName: "clear-dm",
-                description: "Clear spoofed DMs created by SDM Bulk",
-                displayDescription: "Clear spoofed DMs created by SDM Bulk",
+                description: "Clear spoofed DMs created by Reezy Mass DM",
+                displayDescription: "Clear spoofed DMs created by Reezy Mass DM",
                 options: [
                     {
                         name: "targets",
@@ -752,15 +990,17 @@
                 execute: clearRoleSwapExecute
             });
 
-            toast("SDM Bulk enabled.");
+
         },
 
         onUnload() {
             try { unregisterBulk?.(); } catch {}
+            try { unregisterSpoofer?.(); } catch {}
             try { unregisterClear?.(); } catch {}
             try { unregisterRoleSwap?.(); } catch {}
             try { unregisterClearRoleSwap?.(); } catch {}
             unregisterBulk = null;
+            unregisterSpoofer = null;
             unregisterClear = null;
             unregisterRoleSwap = null;
             unregisterClearRoleSwap = null;
