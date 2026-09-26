@@ -91,10 +91,8 @@
         const UserStore = metro.findByProps("getUser", "getCurrentUser");
         const ChannelStore =
             metro.findByProps("getDMChannelFromUserId", "getDMFromUserId") ||
-            metro.findByProps("getChannel", "getDMFromUserId");
-
-        const ChannelActionCreators =
-            metro.findByProps("openPrivateChannel");
+            metro.findByProps("getChannel", "getDMFromUserId") ||
+            metro.findByProps("getDMFromUserId");
 
         const GuildMemberStore =
             metro.findByProps("getMember", "getMembers") ||
@@ -106,16 +104,11 @@
 
         if (!Dispatcher?.dispatch) throw new Error("Could not find Flux dispatcher.");
         if (!UserStore?.getUser) throw new Error("Could not find UserStore.");
-        if (!ChannelStore?.getDMFromUserId) throw new Error("Could not find ChannelStore.");
-        if (!ChannelActionCreators?.openPrivateChannel) {
-            throw new Error("Could not find Discord openPrivateChannel action.");
-        }
-
+        if (!ChannelStore?.getDMFromUserId && !ChannelStore?.getDMChannelFromUserId) throw new Error("Could not find ChannelStore.");
         return {
             Dispatcher,
             UserStore,
             ChannelStore,
-            ChannelActionCreators,
             GuildMemberStore,
             GuildStore
         };
