@@ -1,13 +1,13 @@
 {
-  "name": "Reezy Mass DM",
-  "description": "Stable v2 visible DM opening with real/mutual profile resolution.",
+  "name": "Kettu SDM Toolkit",
+  "description": "All-in-one Kettu toolkit using Discord's real DM-opening action, with local fake messages, timestamps, clearing, and local role spoofing.",
   "authors": [
     {
       "name": "reezywagers"
     }
   ],
   "main": "index.js",
-  "hash": "bb69b7d346e26a1db2c619a19d643e229874b07ce8ada156b233f7b0566e6170",
+  "hash": "34c9865b160a79dbfbe30b669ba4dd715a67ff760f49ad8e36fe31610c982732",
   "vendetta": {
     "icon": "ic_message"
   }
