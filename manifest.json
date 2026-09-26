@@ -1,14 +1,1 @@
-{
-  "name": "Kettu SDM Toolkit Stable",
-  "description": "Stable local-only toolkit using Discord's real DM opener with conservative sequential pacing.",
-  "authors": [
-    {
-      "name": "reezywagers"
-    }
-  ],
-  "main": "index.js",
-  "hash": "ad546be84b56dc05554b02e24bf4cc3820e25f0ea0ab3d446bc18306ae7fae15",
-  "vendetta": {
-    "icon": "ic_message"
-  }
-}
+{"name":"Reezy Mass DM","description":"Local-only fake DMs with a video-style Local Message Spoofer panel and per-target [Server] placeholders.","authors":[{"name":"reezywagers"}],"main":"index.js","hash":"5b1dc05f7855d46851cbe0790fff8be4e59f767cd10f32bb121a71181905084d","vendetta":{"icon":"ic_message"}}
